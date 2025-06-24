@@ -555,6 +555,16 @@ def main():
                     print(f"\t  • Timestamp: {info[2]}")
                     print(f"\t  • Events: {info[3]}")
                     print(f"\t  • FileNo: {fileno[1]}")
+                    
+                    
+                    
+                    # Test name will be in the format QL_<firstQL>_..._<lastQL>_Test: let's extract all the QLs in order
+                    QL_list = info[1].split("_")
+                    QL_list.remove("Test")
+                    QL_list.remove("QL")
+                    
+                    print(f"\t  • QLs: {QL_list}")
+
                     # Create folder for Test
                     testfolder = f"{outdir}/{info[1]}"
                     if not os.path.exists(testfolder):
@@ -572,34 +582,44 @@ def main():
                     lefs = [l for l in lefs if not l.endswith("-B")]
                     print("\t\tFound " + str(len(lefs)) + " LEFs:")
                     for l in lefs:
+                        
                         # Create folder for each LEF 
                         leffolder = f"{testfolder}/{l}"
                         if not os.path.exists(leffolder):
                             os.makedirs(leffolder)
-                            
-                        print(f"\t\t\t  • {l}")
+                        
+                        # Get the LEF serial number from LEF name and QL mapping
+                        lefname = l.split("-")
+                        lefname.remove("A")
+                        lefname.remove("LEF")
+                        lef_serial = ql_mapping["QL-" + QL_list[int(lefname[1])]][int(lefname[2])]
+                        
+                        print(f"\t\t\t  • {l} - LEF for QL-" + QL_list[int(lefname[1])] + " - " + lef_serial)                        
+                        
                         pedestals = lef_ped(t, l, fileno[1])
                         rsigs = lef_rsig(t, l, fileno[1])
                         sigmas = lef_sig(t, l, fileno[1])
                         
-                        
                         # Save pedestals to file
-                        with open(f"{leffolder}/pedestals.csv", "w") as f:
+                        with open(f"{leffolder}/" + lef_serial +"P.csv", "w") as f:
                             f.write("\"Time\",\"channel\",\"pedestal\"\n")
                             for p in pedestals:
                                 f.write(f"{info[2]},{pedestals.index(p)},{p}\n")
+                        print(f"\t\t\t\t  • Saved Pedestals to {leffolder}/" + lef_serial +"P.csv")
                                 
                         # Save raw sigmas to file
-                        with open(f"{leffolder}/raw_sigmas.csv", "w") as f:
+                        with open(f"{leffolder}/" + lef_serial +"R.csv", "w") as f:
                             f.write("\"Time\",\"channel\",\"raw_sigma\"\n")
                             for r in rsigs:
                                 f.write(f"{info[2]},{rsigs.index(r)},{r}\n")
+                        print(f"\t\t\t\t  • Saved Raw Sigmas to {leffolder}/" + lef_serial +"R.csv")
                                 
                         # Save sigmas to file
-                        with open(f"{leffolder}/sigmas.csv", "w") as f:
+                        with open(f"{leffolder}/" + lef_serial +"S.csv", "w") as f:
                             f.write("\"Time\",\"channel\",\"sigma\"\n")
                             for s in sigmas:
                                 f.write(f"{info[2]},{sigmas.index(s)},{s}\n")
+                        print(f"\t\t\t\t  • Saved Sigmas to {leffolder}/" + lef_serial +"S.csv")
             
                         if args.plot:
                             # Plot the list of pedestals, raw sigmas, and sigmas on three subplots
