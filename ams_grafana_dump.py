@@ -5,7 +5,10 @@ from urllib.parse import urljoin
 import requests
 from requests.exceptions import RequestException, Timeout
 import matplotlib.pyplot as plt
+import signal
 from collections import OrderedDict
+import datetime
+import os
 
 # ── Constants ───────────────────────────────────────────────────────
 GRAFANA_TOKEN = keyring.get_password("grafana", "default")
@@ -26,6 +29,16 @@ if not GRAFANA_TOKEN:
 
 session = requests.Session()
 session.headers.update({"Authorization": f"Bearer {GRAFANA_TOKEN}"})
+
+
+
+def signal_handler(sig, frame):
+    # Ask the user if they want to exit
+    ask = input("Are you sure you want to exit? [y/N] ")
+    if ask.lower() == "y":
+        sys.exit(0)
+
+signal.signal(signal.SIGINT, signal_handler)
 
 
 # ─────────────────────────── HTTP helpers ───────────────────────────────────
@@ -116,6 +129,54 @@ def last_tags(n: int, lookback: int):
 
     return filtered[:n]   # respect n even if more rows match
 
+# ────────────────── TAG info lookup helper ──────────────────────────────────
+def tag_info(tag, file):
+    
+    if not tag:
+        return {}
+
+    now_ms  = int(time.time() * 1000)
+    from_ms = now_ms - TAG_LOOKBACK * 60 * 60 * 1000 - 1
+    
+    query = f"SELECT LAST(\"nevents\") FROM \"Calibration\" WHERE (\"tag\" =~ /^{tag}$/ AND \"file\" =~ /^{file.replace('/', '\\/')}$/) AND time >= {TAG_LOOKBACK * 60 * 60 * 1000}ms AND time <= {int(time.time() * 1000)}ms GROUP BY \"test\"" 
+    
+    payload = {
+        "queries": [{
+            "refId":      "G",
+            "datasource": {"uid": DS_UID},
+            "rawQuery":   True,
+            "query":      query,
+            "format":     "table"
+        }],
+        "from": str(from_ms),
+        "to":   str(now_ms)
+    }
+
+    url = f"{BASE_HOST}/api/ds/query"
+    try:
+        resp = session.post(url, json=payload, timeout=TIMEOUT)
+        resp.raise_for_status()
+        frames = resp.json()["results"]["G"]["frames"]        
+    except RequestException as exc:
+        sys.exit(f"[http] {exc}")
+    except KeyError:
+        sys.exit("[parse] Unexpected Grafana response structure (no frames)")
+
+    if not frames:
+        sys.exit("[parse] Empty result set")
+
+    
+    testname = frames[0]['schema']['fields'][1]['labels']['test']
+    
+    timestamp = frames[0]["data"]["values"][0][0]
+    # Convert to human-readable string
+    timestamp = datetime.datetime.fromtimestamp(timestamp / 1000).strftime('%Y-%m-%d %H:%M:%S')
+    
+    nevents = frames[0]["data"]["values"][1][0]
+    
+    
+    return [0, testname, timestamp, nevents]
+    
 # ────────────────── FileNo lookup helper ────────────────────────────────────
 def fileno_for_tag(tag):
     """
@@ -236,8 +297,8 @@ def lef_ped(tag, lef, file):
     now_ms  = int(time.time() * 1000)
     from_ms = now_ms - TAG_LOOKBACK * 60 * 60 * 1000 - 1
 
-    query = f"SELECT \"pedestal\" FROM \"Calibration\" WHERE (\"tag\" =~ /^{tag}$/ AND \"LEF_name\" =~ /^{lef}$/ AND \"file\" =~ /^{file.replace("/", "\\/")}$/) AND time >= {from_ms}ms AND time <= {now_ms}ms GROUP BY \"channel\" ORDER BY time ASC" 
-
+    query = f"SELECT \"pedestal\" FROM \"Calibration\" WHERE (\"tag\" =~ /^{tag}$/ AND \"LEF_name\" =~ /^{lef}$/ AND \"file\" =~ /^{file.replace("/", "\\/")}$/) GROUP BY \"channel\" ORDER BY time ASC" 
+    
     payload = {
         "queries": [{
             "refId":      "E",
@@ -287,7 +348,7 @@ def lef_rsig(tag, lef, file):
     now_ms  = int(time.time() * 1000)
     from_ms = now_ms - TAG_LOOKBACK * 60 * 60 * 1000 - 1
 
-    query = f"SELECT \"raw_sigma\" FROM \"Calibration\" WHERE (\"tag\" =~ /^{tag}$/ AND \"LEF_name\" =~ /^{lef}$/ AND \"file\" =~ /^{file.replace("/", "\\/")}$/) AND time >= {from_ms}ms AND time <= {now_ms}ms GROUP BY \"channel\" ORDER BY time ASC" 
+    query = f"SELECT \"raw_sigma\" FROM \"Calibration\" WHERE (\"tag\" =~ /^{tag}$/ AND \"LEF_name\" =~ /^{lef}$/ AND \"file\" =~ /^{file.replace("/", "\\/")}$/) GROUP BY \"channel\" ORDER BY time ASC" 
 
     payload = {
         "queries": [{
@@ -339,7 +400,7 @@ def lef_sig(tag, lef, file):
     now_ms  = int(time.time() * 1000)
     from_ms = now_ms - TAG_LOOKBACK * 60 * 60 * 1000 - 1
 
-    query = f"SELECT \"sigma\" FROM \"Calibration\" WHERE (\"tag\" =~ /^{tag}$/ AND \"LEF_name\" =~ /^{lef}$/ AND \"file\" =~ /^{file.replace("/", "\\/")}$/) AND time >= {from_ms}ms AND time <= {now_ms}ms GROUP BY \"channel\" ORDER BY time ASC" 
+    query = f"SELECT \"sigma\" FROM \"Calibration\" WHERE (\"tag\" =~ /^{tag}$/ AND \"LEF_name\" =~ /^{lef}$/ AND \"file\" =~ /^{file.replace("/", "\\/")}$/) GROUP BY \"channel\" ORDER BY time ASC" 
 
     payload = {
         "queries": [{
@@ -383,7 +444,7 @@ def lef_sig(tag, lef, file):
 def cli_args():
     p = argparse.ArgumentParser(
         description="Fetch dashboard JSON and most-recent TAG values.")
-    p.add_argument("uid_or_url", nargs="?", default=BASE_DASH_UID,
+    p.add_argument("--uid_or_url", nargs="?", default=BASE_DASH_UID,
                    help="Dashboard UID or full https:// URL")
     p.add_argument("--ntags", type=int, default=20,
                    help="How many TAG values to fetch (default: 20)")
@@ -416,45 +477,96 @@ def main():
         
     if args.ntags > 0 and args.time > 0:
         tags = last_tags(args.ntags, args.time)
-        print(f"\nLatest {args.ntags} TAG values (last {args.time} h):")
+        print(f"\nSearching for latest {args.ntags} TAG values (in the last {args.time} h):")
         for t in tags:
             print(f"  • Found tag: {t}")
-                    
+            
+            # Create output directory
+            outdir = f"output/TAG_{t}"
+            if not os.path.exists(outdir):
+                os.makedirs(outdir)
+            
             fileno = fileno_for_tag(t)
+            
             if fileno[0] == -1 or fileno[0] == -2 or fileno[0] == -3 or fileno[0] == -4:
                 print(f"\t  • FileNo not found: {fileno[1]}")
             else:
+
+                info = tag_info(t, fileno[1])
+            
+                if info[0] == -1 or info[0] == -2 or info[0] == -3 or info[0] == -4:
+                    print("\t  • TAG info not found")
+                else:
+                    #Print TAG info
                     print(f"\t  • FileNo: {fileno[1]}")
-                    lef = lef_for_file(t, fileno[1])
-                    if lef[0] == -1 or lef[0] == -2 or lef[0] == -3 or lef[0] == -4:
-                        print(f"\t\t  • LEF not found: {lef[1]}")
-                    else:
-                        # Find unique LEFs
-                        lefs = set(lef[1])
-                        # Order by LEF name
-                        lefs = sorted(lefs, key=lambda x: x.lower())
-                        # Remove entries with -B suffix
-                        lefs = [l for l in lefs if not l.endswith("-B")]
-                        print("\t\tFound " + str(len(lefs)) + " LEFs:")
-                        for l in lefs:
-                            print(f"\t\t\t  • {l}")
-                            pedestals = lef_ped(t, l, fileno[1])
-                            rsigs = lef_rsig(t, l, fileno[1])
-                            sigmas = lef_sig(t, l, fileno[1])
+                    print(f"\t  • Test: {info[1]}")
+                    print(f"\t  • Timestamp: {info[2]}")
+                    print(f"\t  • Events: {info[3]}")
+                    print(f"\t  • FileNo: {fileno[1]}")
+                    # Create folder for Test
+                    testfolder = f"{outdir}/{info[1]}"
+                    if not os.path.exists(testfolder):
+                        os.makedirs(testfolder)
+        
+                lef = lef_for_file(t, fileno[1])
+                if lef[0] == -1 or lef[0] == -2 or lef[0] == -3 or lef[0] == -4:
+                    print(f"\t\t  • LEF not found: {lef[1]}")
+                else:
+                    # Find unique LEFs
+                    lefs = set(lef[1])
+                    # Order by LEF name
+                    lefs = sorted(lefs, key=lambda x: x.lower())
+                    # Remove entries with -B suffix
+                    lefs = [l for l in lefs if not l.endswith("-B")]
+                    print("\t\tFound " + str(len(lefs)) + " LEFs:")
+                    for l in lefs:
+                        # Create folder for each LEF 
+                        leffolder = f"{testfolder}/{l}"
+                        if not os.path.exists(leffolder):
+                            os.makedirs(leffolder)
                             
-                            if args.plot:
-                                # Plot the list of pedestals, raw sigmas, and sigmas on three subplots
-                                fig, axs = plt.subplots(3, 1, sharex=True, figsize=(10, 8))
-                                axs[0].plot(pedestals, label="Pedestals")
-                                axs[0].set_title("Pedestals", loc="left")
-                                axs[1].plot(rsigs, label="Raw Sigmas")
-                                axs[1].set_title("Raw Sigmas", loc="left")
-                                axs[2].plot(sigmas, label="Sigmas")
-                                axs[2].set_title("Sigmas", loc="left")
-                                axs[0].legend()
-                                axs[1].legend()
-                                axs[2].legend()
-                                plt.show()
+                        print(f"\t\t\t  • {l}")
+                        pedestals = lef_ped(t, l, fileno[1])
+                        rsigs = lef_rsig(t, l, fileno[1])
+                        sigmas = lef_sig(t, l, fileno[1])
+                        
+                        
+                        # Save pedestals to file
+                        with open(f"{leffolder}/pedestals.csv", "w") as f:
+                            f.write("\"Time\",\"channel\",\"pedestal\"\n")
+                            for p in pedestals:
+                                f.write(f"{info[2]},{pedestals.index(p)},{p}\n")
+                                
+                        # Save raw sigmas to file
+                        with open(f"{leffolder}/raw_sigmas.csv", "w") as f:
+                            f.write("\"Time\",\"channel\",\"raw_sigma\"\n")
+                            for r in rsigs:
+                                f.write(f"{info[2]},{rsigs.index(r)},{r}\n")
+                                
+                        # Save sigmas to file
+                        with open(f"{leffolder}/sigmas.csv", "w") as f:
+                            f.write("\"Time\",\"channel\",\"sigma\"\n")
+                            for s in sigmas:
+                                f.write(f"{info[2]},{sigmas.index(s)},{s}\n")
+            
+                        if args.plot:
+                            # Plot the list of pedestals, raw sigmas, and sigmas on three subplots
+                            fig, axs = plt.subplots(3, 1, sharex=True, figsize=(10, 8))
+                            axs[0].plot(pedestals, label="Pedestals")
+                            axs[0].set_title("Pedestals", loc="left")
+                            axs[1].plot(rsigs, label="Raw Sigmas")
+                            axs[1].set_title("Raw Sigmas", loc="left")
+                            axs[2].plot(sigmas, label="Sigmas")
+                            axs[2].set_title("Sigmas", loc="left")
+                            axs[0].legend()
+                            axs[1].legend()
+                            axs[2].legend()
+                            
+                            # Save plot to file
+                            plt.savefig(f"{leffolder}/calibration.png")
+                            print(f"\t\t\t\t  • Saved plot to {leffolder}/calibration.png")
+                            plt.close()
+
 
 if __name__ == "__main__":
     main()
