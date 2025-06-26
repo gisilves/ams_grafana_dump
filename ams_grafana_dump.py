@@ -158,10 +158,10 @@ def last_tags(n: int, lookback: int):
         sys.exit(f"[http] {exc}")
     except KeyError:
         sys.exit("[parse] Unexpected Grafana response structure (no frames)")
-
+        
     if not frames:
         sys.exit("[parse] Empty result set")
-
+        
     frame = frames[0]
 
     # Arrow frame → values per column; table → rows. We assume:
@@ -506,6 +506,10 @@ def cli_args():
                    help="Plot pedestals, raw sigmas, and sigmas")
     p.add_argument("--print", action="store_true", default=False,
                    help="Print dashboard JSON (default: True)")
+    p.add_argument("--newest", type=str, default=256,
+                   help="Only fetch TAGs older than the one provided")
+    p.add_argument("--oldest", type=str, default=-1,
+                   help="Only fetch TAGs newer than the one provided")
     return p.parse_args()
 
 
@@ -526,11 +530,25 @@ def main():
     
     if args.print:
         print(json.dumps(dash_json, indent=2))
+
+    if args.newest != -1:
+        print(f"\nDumping TAGs older than {args.newest}")
         
+    if args.oldest != -1:
+        print(f"\nDumping TAGs newer than {args.oldest}")
+
     if args.ntags > 0 and args.time > 0:
         tags = last_tags(args.ntags, args.time)
         print(f"\nSearching for latest {args.ntags} TAG values (in the last {args.time} h):")
         for t in tags:
+            if args.newest != 256 or args.oldest != -1:
+                if int(t[-2:],16) >= int(args.newest[-2:],16):
+                    print(f"  • Skipping {t} because it's newer than {args.newest}")
+                    continue
+                elif int(t[-2:],16) <= int(args.oldest[-2:],16):
+                    print(f"  • Skipping {t} because it's older than {args.oldest}")
+                    continue
+
             print(f"  • Found tag: {t}")
             
             # Create output directory
