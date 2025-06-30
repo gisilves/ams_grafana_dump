@@ -506,7 +506,7 @@ def cli_args():
                    help="Plot pedestals, raw sigmas, and sigmas")
     p.add_argument("--print", action="store_true", default=False,
                    help="Print dashboard JSON (default: True)")
-    p.add_argument("--newest", type=str, default=256,
+    p.add_argument("--newest", type=str, default="0xCFF",
                    help="Only fetch TAGs older than the one provided")
     p.add_argument("--oldest", type=str, default=-1,
                    help="Only fetch TAGs newer than the one provided")
@@ -531,7 +531,7 @@ def main():
     if args.print:
         print(json.dumps(dash_json, indent=2))
 
-    if args.newest != -1:
+    if args.newest != 0xCFF:
         print(f"\nDumping TAGs older than {args.newest}")
         
     if args.oldest != -1:
@@ -541,7 +541,7 @@ def main():
         tags = last_tags(args.ntags, args.time)
         print(f"\nSearching for latest {args.ntags} TAG values (in the last {args.time} h):")
         for t in tags:
-            if args.newest != 256 or args.oldest != -1:
+            if args.newest != 0xCFF or args.oldest != -1:
                 if int(t[-2:],16) >= int(args.newest[-2:],16):
                     print(f"  • Skipping {t} because it's newer than {args.newest}")
                     continue
