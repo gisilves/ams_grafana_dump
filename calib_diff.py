@@ -65,7 +65,7 @@ ql_mapping = {
 }
 
 
-# ────────────────────────────────────────────────────────────────────────────
+# ───────────────────────────────────────────────────────────────────────────────────
 
 
 # ───────────────────────────── I/O helpers ─────────────────────────────────────────
@@ -332,6 +332,13 @@ def _parse_args(argv: List[str]) -> argparse.Namespace:
         help="Which quantity to analyse.",
     )
     parser.add_argument(
+        "--name",
+        help="Name of the object (e.g. LEF name or QL name).",
+        required=False,
+        default=None,
+        type=str
+    )
+    parser.add_argument(
         "--plots",
         action="store_true",
         help="Interactive plotting (useful in CI environments).",
@@ -354,7 +361,10 @@ def main(argv: List[str] | None = None) -> None:
 
     if args.level == "LEF":
         print("Finding TAGs at LEF level")
-        lefname = input("Enter LEF name: ")
+        if args.name is None:
+            lefname = input("Enter LEF name: ")
+        else:
+            lefname = args.name
         tags = find_calibs(lefname, args.kind)
         if not tags:
             sys.exit("No matching calibrations found - nothing to do.")
@@ -379,7 +389,10 @@ def main(argv: List[str] | None = None) -> None:
             
     elif args.level == "QL":
         print("Finding TAGs at QL level")
-        qlname = input("Enter QL name: ")
+        if args.name is None:
+            qlname = input("Enter QL name: ")
+        else:
+            qlname = args.name
         
         # Check if the QL is in the mapping
         if qlname not in ql_mapping:
@@ -433,7 +446,7 @@ def main(argv: List[str] | None = None) -> None:
 
         if args.cumulative and cumulative_frames:
             cumulative_df = pd.concat(cumulative_frames, ignore_index=True)
-            savefile = f"stats/{qlname}/{args.kind}_diff_QL{qlname}.csv"
+            savefile = f"stats/{qlname}/{args.kind}_diff_{qlname}.csv"
             os.makedirs(os.path.dirname(savefile), exist_ok=True)
             cumulative_df.to_csv(savefile, index=False)
             print(f"Cumulative stats table written → {savefile}")
