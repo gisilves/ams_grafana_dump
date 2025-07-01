@@ -7,7 +7,7 @@ from requests.exceptions import RequestException, Timeout
 import matplotlib.pyplot as plt
 import signal
 from collections import OrderedDict
-import datetime
+from datetime import datetime, timezone
 import os
 
 # ── Constants ───────────────────────────────────────────────────────
@@ -20,7 +20,6 @@ BASE_HOST     = "https://ams-ami.web.cern.ch"
 TIMEOUT       = 60                     # seconds
 MAX_REDIRECTS = 20
 TAG_RUN       = 2                      # WHERE "run" = 2  (CAL)
-TAG_LOOKBACK  = 3                      # hours
 TAG_COL_IDX   = 1                      # hard-coded "tag" column
 # ────────────────────────────────────────────────────────────────────────────
 
@@ -181,6 +180,50 @@ def last_tags(n: int, lookback: int):
 
     return filtered[:n]   # respect n even if more rows match
 
+
+def db_test(tag="0xC38"):
+    query = 'SHOW FIELD KEYS FROM "DAQ_runs"'
+
+    now_ms = int(time.time() * 1000)
+    from_ms = now_ms - TAG_LOOKBACK * 60 * 60 * 1000 - 1
+
+    payload = {
+        "queries": [{
+            "refId":      "B",
+            "datasource": {"uid": DS_UID},
+            "rawQuery":   True,
+            "query":      query,
+            "format":     "table"
+        }],
+        "from": str(from_ms),
+        "to":   str(now_ms)
+    }
+
+    url = f"{BASE_HOST}/api/ds/query"
+    try:
+        resp = session.post(url, json=payload, timeout=TIMEOUT)
+        resp.raise_for_status()
+        data = resp.json()
+        print(json.dumps(data, indent=2))  # Safely inspect full response
+
+        # Look for results["B"]["tables"][0]["rows"] or frames
+        result = data["results"]["B"]
+
+        if "frames" in result:
+            frames = result["frames"]
+            print("[OK] Found frames:", frames)
+        elif "tables" in result:
+            tables = result["tables"]
+            print("[OK] Found tables:", tables)
+        else:
+            print("[!] No frames or tables in result:", result)
+
+    except RequestException as exc:
+        sys.exit(f"[http] {exc}")
+    except KeyError as exc:
+        sys.exit(f"[parse] Unexpected Grafana response structure: {exc}")
+
+
 # ────────────────── TAG info lookup helper ──────────────────────────────────
 def tag_info(tag, file):
     
@@ -190,7 +233,12 @@ def tag_info(tag, file):
     now_ms  = int(time.time() * 1000)
     from_ms = now_ms - TAG_LOOKBACK * 60 * 60 * 1000 - 1
     
-    query = f"SELECT LAST(\"nevents\") FROM \"Calibration\" WHERE (\"tag\" =~ /^{tag}$/ AND \"file\" =~ /^{file.replace('/', '\\/')}$/) AND time >= {TAG_LOOKBACK * 60 * 60 * 1000}ms AND time <= {int(time.time() * 1000)}ms GROUP BY \"test\"" 
+    query = (
+        f'SELECT LAST("nevents") '
+        f'FROM "Calibration" '
+        f'WHERE ("tag" =~ /^{tag}$/ AND "file" =~ /^{file.replace("/", "\\/")}$/) '
+        f'GROUP BY "test"'
+    )
     
     payload = {
         "queries": [{
@@ -221,44 +269,43 @@ def tag_info(tag, file):
     testname = frames[0]['schema']['fields'][1]['labels']['test']
     
     timestamp = frames[0]["data"]["values"][0][0]
-    # Convert to human-readable string
-    timestamp = datetime.datetime.fromtimestamp(timestamp / 1000).strftime('%Y-%m-%d %H:%M:%S')
+    # Convert to human-readable string (UTC)
+    timestamp = datetime.fromtimestamp(timestamp / 1000, tz=timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')
     
     nevents = frames[0]["data"]["values"][1][0]
     
     
     return [0, testname, timestamp, nevents]
     
-# ────────────────── FileNo lookup helper ────────────────────────────────────
 def fileno_for_tag(tag):
     """
-    Return a dict {tag → FileNo} for every tag in *tags_needed*.
+    Return [0, file] if a matching tag is found in the recent DAQ_runs;
+    otherwise, return an error code and message.
     """
     if not tag:
-        return {}
-
+        return [-10, "No tag provided"]
+    
+    # Query both "tag" and "file" fields
     query = (
-        f'SELECT "file" ' 
+        f'SELECT "tag", "file" '
         f'FROM "DAQ_runs" '
-        f'WHERE "tag" =~ /^({tag})$/ '
-        f'ORDER BY time DESC LIMIT 1'
+        f'WHERE time > now() - {TAG_LOOKBACK}h '
     )
 
-    now_ms  = int(time.time() * 1000)
+    now_ms = int(time.time() * 1000)
     from_ms = now_ms - TAG_LOOKBACK * 60 * 60 * 1000 - 1
 
     payload = {
         "queries": [{
-            "refId":      "B",
+            "refId": "B",
             "datasource": {"uid": DS_UID},
-            "rawQuery":   True,
-            "query":      query,
-            "format":     "table"
+            "rawQuery": True,
+            "query": query,
+            "format": "table"
         }],
         "from": str(from_ms),
-        "to":   str(now_ms)
+        "to": str(now_ms)
     }
-
 
     url = f"{BASE_HOST}/api/ds/query"
     try:
@@ -268,21 +315,33 @@ def fileno_for_tag(tag):
     except RequestException as exc:
         print(f"\t[http] {exc}")
         return [-1, exc]
-    except KeyError:
-        print("\t[parse] Unexpected Grafana response structure (no frames)")
+    except KeyError as exc:
+        print(f"\t[parse] Unexpected Grafana response structure: {exc}")
         return [-2, "KeyError"]
     
     if not frames:
         print("\t[parse] Empty result set")
         return [-3, "Empty result set"]
+
+    tag_frame = frames[0]
+    file_frame = frames[1]
     
-    frame = frames[0]
-    fileno = frame["data"]["values"][1][0]
+    tag_values = tag_frame["data"]["values"]
+    file_values = file_frame["data"]["values"]
     
-    if not fileno:
-        return [-4, "FileNo not found"]
+    # Sort the tag_values by time
+    tag_values[0].sort()
+    # Sort the file_values by time
+    file_values[0].sort()
     
-    return [0, fileno]
+    try:
+        # Find the chosen TAG in the tag_values
+        tag_idx = [i for i, x in enumerate(tag_values[1]) if x == tag]
+        # Find the corresponding file in the file_values (only for last occurrence of tag)
+        fileno = file_values[1][tag_idx[-1]]
+        return [0, fileno]
+    except ValueError as e:
+        return [-4, f"Missing field in response: {e}"]
 
 # ────────────────── LEF lookup helper ────────────────────────────────────
 def lef_for_file(tag, fileno):
@@ -498,18 +557,20 @@ def cli_args():
         description="Fetch dashboard JSON and most-recent TAG values.")
     p.add_argument("--uid_or_url", nargs="?", default=BASE_DASH_UID,
                    help="Dashboard UID or full https:// URL")
-    p.add_argument("--ntags", type=int, default=20,
-                   help="How many TAG values to fetch (default: 20)")
-    p.add_argument("--time", type=int, default=3,
-                   help="How many hours to look back (default: 3 hours)")
+    p.add_argument("--ntags", type=int, default=255,
+                   help="How many TAG values to fetch (default: 255)")
+    p.add_argument("--time", type=int, default=5000,
+                   help="How many hours to look back (default: 5000 hours)")
     p.add_argument("--plot", action="store_true",
                    help="Plot pedestals, raw sigmas, and sigmas")
     p.add_argument("--print", action="store_true", default=False,
                    help="Print dashboard JSON (default: True)")
     p.add_argument("--newest", type=str, default="0xCFF",
                    help="Only fetch TAGs older than the one provided")
-    p.add_argument("--oldest", type=str, default=-1,
+    p.add_argument("--oldest", type=str, default="0xC00",
                    help="Only fetch TAGs newer than the one provided")
+    p.add_argument("--name", type=str, default=None,
+                   help="Only fetch TAGs with this name")
     return p.parse_args()
 
 
@@ -527,7 +588,7 @@ def main():
         sys.exit(f"[http] {exc}")
 
     dash_json = safe_json(resp)
-    
+
     if args.print:
         print(json.dumps(dash_json, indent=2))
 
@@ -536,18 +597,29 @@ def main():
         
     if args.oldest != -1:
         print(f"\nDumping TAGs newer than {args.oldest}")
+    
+    if args.name != None:
+        print(f"\nDumping TAG {args.name}")
+        
+    global TAG_LOOKBACK
+    TAG_LOOKBACK = args.time
 
     if args.ntags > 0 and args.time > 0:
         tags = last_tags(args.ntags, args.time)
         print(f"\nSearching for latest {args.ntags} TAG values (in the last {args.time} h):")
         for t in tags:
-            if args.newest != 0xCFF or args.oldest != -1:
-                if int(t[-2:],16) >= int(args.newest[-2:],16):
-                    print(f"  • Skipping {t} because it's newer than {args.newest}")
-                    continue
-                elif int(t[-2:],16) <= int(args.oldest[-2:],16):
-                    print(f"  • Skipping {t} because it's older than {args.oldest}")
-                    continue
+            if args.name != None and int(args.name[-2:],16) != int(t[-2:],16):
+                print(f"  • Skipping {t} because it's not {args.name}")
+                continue
+            
+            if args.name == None:
+                if args.newest != 0xCFF or args.oldest != -1:
+                    if int(t[-2:],16) >= int(args.newest[-2:],16):
+                        print(f"  • Skipping {t} because it's newer than {args.newest}")
+                        continue
+                    elif int(t[-2:],16) <= int(args.oldest[-2:],16):
+                        print(f"  • Skipping {t} because it's older than {args.oldest}")
+                        continue
 
             print(f"  • Found tag: {t}")
             
@@ -557,11 +629,10 @@ def main():
                 os.makedirs(outdir)
             
             fileno = fileno_for_tag(t)
-            
+
             if fileno[0] == -1 or fileno[0] == -2 or fileno[0] == -3 or fileno[0] == -4:
                 print(f"\t  • FileNo not found: {fileno[1]}")
             else:
-
                 info = tag_info(t, fileno[1])
             
                 if info[0] == -1 or info[0] == -2 or info[0] == -3 or info[0] == -4:
@@ -573,8 +644,6 @@ def main():
                     print(f"\t  • Timestamp: {info[2]}")
                     print(f"\t  • Events: {info[3]}")
                     print(f"\t  • FileNo: {fileno[1]}")
-                    
-                    
                     
                     # Test name will be in the format QL_<firstQL>_..._<lastQL>_Test: let's extract all the QLs in order
                     QL_list = info[1].split("_")
