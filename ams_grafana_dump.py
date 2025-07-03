@@ -337,9 +337,34 @@ def fileno_for_tag(tag):
     try:
         # Find the chosen TAG in the tag_values
         tag_idx = [i for i, x in enumerate(tag_values[1]) if x == tag]
-        # Find the corresponding file in the file_values (only for last occurrence of tag)
-        fileno = file_values[1][tag_idx[-1]]
-        return [0, fileno]
+        
+        if len(tag_idx) > 1:
+            print(f"\t[warn] Found multiple tags with the same name: {tag}")
+            for i in tag_idx:
+                print(f"\t\t• {tag_values[1][i]} with file {file_values[1][i]}")
+            
+            multiple_files_in_same_folder = True
+            first_folder = ""
+            
+            for i in tag_idx:
+                # Check if the BLOCKfile folder is the same for all of them
+                if i == tag_idx[0]:
+                    first_folder = file_values[1][i].split("/")[0]
+                elif file_values[1][i].split("/")[0] != first_folder:
+                    print(f"\t\t\t[warn] Some files are from different folders")
+                    multiple_files_in_same_folder = False
+                    break
+                
+        if multiple_files_in_same_folder:
+            print(f"\tMultiple files are from same folder, assumning they are from the same run and using the last one.") 
+            # Find the corresponding file in the file_values (only for last occurrence of tag)
+            fileno = file_values[1][tag_idx[-1]]
+        else:
+            # Let the user choose the file
+            fileno = input(f"\t[warn] Multiple files found for tag {tag}, please choose one: ")
+
+        if fileno:
+            return [0, fileno]
     except ValueError as e:
         return [-4, f"Missing field in response: {e}"]
 
@@ -571,6 +596,8 @@ def cli_args():
                    help="Only fetch TAGs newer than the one provided")
     p.add_argument("--name", type=str, default=None,
                    help="Only fetch TAGs with this name")
+    p.add_argument("--info", action="store_true", default=False,
+                   help="Only print TAG info")
     return p.parse_args()
 
 
@@ -601,6 +628,9 @@ def main():
     if args.name != None:
         print(f"\nDumping TAG {args.name}")
         
+    if args.info:
+        print(f"\nOnly printing TAG info")
+        
     global TAG_LOOKBACK
     TAG_LOOKBACK = args.time
 
@@ -614,7 +644,7 @@ def main():
             
             if args.name == None:
                 if args.newest != 0xCFF or args.oldest != -1:
-                    if int(t[-2:],16) >= int(args.newest[-2:],16):
+                    if int(t[-2:],16) > int(args.newest[-2:],16):
                         print(f"  • Skipping {t} because it's newer than {args.newest}")
                         continue
                     elif int(t[-2:],16) <= int(args.oldest[-2:],16):
@@ -623,10 +653,11 @@ def main():
 
             print(f"  • Found tag: {t}")
             
-            # Create output directory
-            outdir = f"output/TAG_{t}"
-            if not os.path.exists(outdir):
-                os.makedirs(outdir)
+            if not args.info:
+                # Create output directory
+                outdir = f"output/TAG_{t}"
+                if not os.path.exists(outdir):
+                    os.makedirs(outdir)
             
             fileno = fileno_for_tag(t)
 
@@ -645,86 +676,88 @@ def main():
                     print(f"\t  • Events: {info[3]}")
                     print(f"\t  • FileNo: {fileno[1]}")
                     
-                    # Test name will be in the format QL_<firstQL>_..._<lastQL>_Test: let's extract all the QLs in order
-                    QL_list = info[1].split("_")
-                    QL_list.remove("Test")
-                    QL_list.remove("QL")
-                    
-                    print(f"\t  • QLs: {QL_list}")
+                    if not args.info:
+                        # Test name will be in the format QL_<firstQL>_..._<lastQL>_Test: let's extract all the QLs in order
+                        QL_list = info[1].split("_")
+                        QL_list.remove("Test")
+                        QL_list.remove("QL")
+                        
+                        print(f"\t  • QLs: {QL_list}")
 
-                    # Create folder for Test
-                    testfolder = f"{outdir}/{info[1]}"
-                    if not os.path.exists(testfolder):
-                        os.makedirs(testfolder)
-        
-                lef = lef_for_file(t, fileno[1])
-                if lef[0] == -1 or lef[0] == -2 or lef[0] == -3 or lef[0] == -4:
-                    print(f"\t\t  • LEF not found: {lef[1]}")
-                else:
-                    # Find unique LEFs
-                    lefs = set(lef[1])
-                    # Order by LEF name
-                    lefs = sorted(lefs, key=lambda x: x.lower())
-                    # Remove entries with -B suffix
-                    lefs = [l for l in lefs if not l.endswith("-B")]
-                    print("\t\tFound " + str(len(lefs)) + " LEFs:")
-                    for l in lefs:
-                        
-                        # Create folder for each LEF 
-                        leffolder = f"{testfolder}/{l}"
-                        if not os.path.exists(leffolder):
-                            os.makedirs(leffolder)
-                        
-                        # Get the LEF serial number from LEF name and QL mapping
-                        lefname = l.split("-")
-                        lefname.remove("A")
-                        lefname.remove("LEF")
-                        lef_serial = ql_mapping["QL-" + QL_list[int(lefname[1])]][int(lefname[2])]
-                        
-                        print(f"\t\t\t  • {l} - LEF for QL-" + QL_list[int(lefname[1])] + " - " + lef_serial)                        
-                        
-                        pedestals = lef_ped(t, l, fileno[1])
-                        rsigs = lef_rsig(t, l, fileno[1])
-                        sigmas = lef_sig(t, l, fileno[1])
-                        
-                        # Save pedestals to file
-                        with open(f"{leffolder}/" + lef_serial +"P.csv", "w") as f:
-                            f.write("\"Time\",\"channel\",\"pedestal\"\n")
-                            for p in pedestals:
-                                f.write(f"{info[2]},{pedestals.index(p)},{p}\n")
-                        print(f"\t\t\t\t  • Saved Pedestals to {leffolder}/" + lef_serial +"P.csv")
-                                
-                        # Save raw sigmas to file
-                        with open(f"{leffolder}/" + lef_serial +"R.csv", "w") as f:
-                            f.write("\"Time\",\"channel\",\"raw_sigma\"\n")
-                            for r in rsigs:
-                                f.write(f"{info[2]},{rsigs.index(r)},{r}\n")
-                        print(f"\t\t\t\t  • Saved Raw Sigmas to {leffolder}/" + lef_serial +"R.csv")
-                                
-                        # Save sigmas to file
-                        with open(f"{leffolder}/" + lef_serial +"S.csv", "w") as f:
-                            f.write("\"Time\",\"channel\",\"sigma\"\n")
-                            for s in sigmas:
-                                f.write(f"{info[2]},{sigmas.index(s)},{s}\n")
-                        print(f"\t\t\t\t  • Saved Sigmas to {leffolder}/" + lef_serial +"S.csv")
-            
-                        if args.plot:
-                            # Plot the list of pedestals, raw sigmas, and sigmas on three subplots
-                            fig, axs = plt.subplots(3, 1, sharex=True, figsize=(10, 8))
-                            axs[0].plot(pedestals, label="Pedestals")
-                            axs[0].set_title("Pedestals", loc="left")
-                            axs[1].plot(rsigs, label="Raw Sigmas")
-                            axs[1].set_title("Raw Sigmas", loc="left")
-                            axs[2].plot(sigmas, label="Sigmas")
-                            axs[2].set_title("Sigmas", loc="left")
-                            axs[0].legend()
-                            axs[1].legend()
-                            axs[2].legend()
+                        # Create folder for Test
+                        testfolder = f"{outdir}/{info[1]}"
+                        if not os.path.exists(testfolder):
+                            os.makedirs(testfolder)
+                if not args.info:
+                    lef = lef_for_file(t, fileno[1])
+                    if lef[0] == -1 or lef[0] == -2 or lef[0] == -3 or lef[0] == -4:
+                        print(f"\t\t  • LEF not found: {lef[1]}")
+                    else:
+                        # Find unique LEFs
+                        lefs = set(lef[1])
+                        # Order by LEF name
+                        lefs = sorted(lefs, key=lambda x: x.lower())
+                        # Remove entries with -B suffix
+                        lefs = [l for l in lefs if not l.endswith("-B")]
+                        lefs = [l for l in lefs if not l.startswith("LEF-U")]
+                        print("\t\tFound " + str(len(lefs)) + " LEFs:")
+                        for l in lefs:
                             
-                            # Save plot to file
-                            plt.savefig(f"{leffolder}/calibration.png")
-                            print(f"\t\t\t\t  • Saved plot to {leffolder}/calibration.png")
-                            plt.close()
+                            # Create folder for each LEF 
+                            leffolder = f"{testfolder}/{l}"
+                            if not os.path.exists(leffolder):
+                                os.makedirs(leffolder)
+                            
+                            # Get the LEF serial number from LEF name and QL mapping
+                            lefname = l.split("-")
+                            lefname.remove("A")
+                            lefname.remove("LEF")
+                            lef_serial = ql_mapping["QL-" + QL_list[int(lefname[1])]][int(lefname[2])]
+                            
+                            print(f"\t\t\t  • {l} - LEF for QL-" + QL_list[int(lefname[1])] + " - " + lef_serial)                        
+                            
+                            pedestals = lef_ped(t, l, fileno[1])
+                            rsigs = lef_rsig(t, l, fileno[1])
+                            sigmas = lef_sig(t, l, fileno[1])
+                            
+                            # Save pedestals to file
+                            with open(f"{leffolder}/" + lef_serial +"P.csv", "w") as f:
+                                f.write("\"Time\",\"channel\",\"pedestal\"\n")
+                                for p in pedestals:
+                                    f.write(f"{info[2]},{pedestals.index(p)},{p}\n")
+                            print(f"\t\t\t\t  • Saved Pedestals to {leffolder}/" + lef_serial +"P.csv")
+                                    
+                            # Save raw sigmas to file
+                            with open(f"{leffolder}/" + lef_serial +"R.csv", "w") as f:
+                                f.write("\"Time\",\"channel\",\"raw_sigma\"\n")
+                                for r in rsigs:
+                                    f.write(f"{info[2]},{rsigs.index(r)},{r}\n")
+                            print(f"\t\t\t\t  • Saved Raw Sigmas to {leffolder}/" + lef_serial +"R.csv")
+                                    
+                            # Save sigmas to file
+                            with open(f"{leffolder}/" + lef_serial +"S.csv", "w") as f:
+                                f.write("\"Time\",\"channel\",\"sigma\"\n")
+                                for s in sigmas:
+                                    f.write(f"{info[2]},{sigmas.index(s)},{s}\n")
+                            print(f"\t\t\t\t  • Saved Sigmas to {leffolder}/" + lef_serial +"S.csv")
+                
+                            if args.plot:
+                                # Plot the list of pedestals, raw sigmas, and sigmas on three subplots
+                                fig, axs = plt.subplots(3, 1, sharex=True, figsize=(10, 8))
+                                axs[0].plot(pedestals, label="Pedestals")
+                                axs[0].set_title("Pedestals", loc="left")
+                                axs[1].plot(rsigs, label="Raw Sigmas")
+                                axs[1].set_title("Raw Sigmas", loc="left")
+                                axs[2].plot(sigmas, label="Sigmas")
+                                axs[2].set_title("Sigmas", loc="left")
+                                axs[0].legend()
+                                axs[1].legend()
+                                axs[2].legend()
+                                
+                                # Save plot to file
+                                plt.savefig(f"{leffolder}/calibration.png")
+                                print(f"\t\t\t\t  • Saved plot to {leffolder}/calibration.png")
+                                plt.close()
 
 
 if __name__ == "__main__":
