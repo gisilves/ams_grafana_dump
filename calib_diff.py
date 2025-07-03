@@ -132,7 +132,7 @@ def _core_df(path: str | pathlib.Path, col: str) -> pd.DataFrame:
     Duplicate channels are silently de-duped (first occurrence wins).
     """
     df = read_calib(path)
-    df["Time"] = pd.to_datetime(df["Time"], format="%Y-%m-%d %H:%M:%S")
+    df["Time"] = pd.to_datetime(df["Time"], format="%Y-%m-%d %H:%M:%S UTC")
 
     if df["channel"].duplicated().any():
         dup_ch = df.loc[df["channel"].duplicated(), "channel"].unique()
