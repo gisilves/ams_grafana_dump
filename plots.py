@@ -12,6 +12,7 @@ import pandas as pd
 import numpy as np
 from typing import List
 import sys
+import os
 
 # Define the RMS of mean formula
 def rms_of_mean(rms_series):
@@ -87,11 +88,22 @@ def main(argv: List[str] | None = None) -> None:
     if args.ql != "ALL":
         ql = args.ql
         csv_path = f"{args.datafolder}/{ql}/{args.parameter}_diff_{ql}.csv"
-        print(csv_path)
         title = f"{ql} {args.parameter} vs Time"
         xlabel = "Time (s)"
         ylabel = f"{args.parameter} (ADC)"
         plot_csv(csv_path, title, xlabel, ylabel)
+    else:
+        qls = ["QL-L1", "QL-L2", "QL-L3", "QL-L4", "QL-R1", "QL-R2", "QL-R3", "QL-R4"]
+        for ql in qls:
+            csv_path = f"{args.datafolder}/{ql}/{args.parameter}_diff_{ql}.csv"
+            # Check if the CSV exists
+            if not os.path.exists(csv_path):
+                print(f"CSV file not found: {csv_path}")
+                continue
+            title = f"{ql} {args.parameter} vs Time"
+            xlabel = "Time (s)"
+            ylabel = f"{args.parameter} (ADC)"            
+            plot_csv(csv_path, title, xlabel, ylabel)   
 
 if __name__ == "__main__":
     main()
